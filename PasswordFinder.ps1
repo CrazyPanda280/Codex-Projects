@@ -74,6 +74,13 @@ $currentAttemptText = $window.FindName('CurrentAttemptText')
 
 $script:startTime = $null
 $script:attemptCount = 0L
+$script:target = ''
+[char[]]$script:characters = @()
+$script:length = 1
+[int[]]$script:indices = @()
+$script:lastAttempt = ''
+$script:isRunning = $false
+$script:stopRequested = $false
 
 function Format-Duration([TimeSpan]$duration) {
     '{0:D2}:{1:D2}.{2:D3}' -f [int]$duration.TotalMinutes, $duration.Seconds, $duration.Milliseconds
@@ -126,121 +133,95 @@ function Get-CharacterSet {
     return $chars.ToArray()
 }
 
-$timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(50)
-$timer.Add_Tick({
+function Finish-Run([string]$status) {
+    $workTimer.Stop()
+    $elapsedTimer.Stop()
+
+    if ($script:startTime) {
+        $elapsedText.Text = Format-Duration ((Get-Date) - $script:startTime)
+    }
+
+    $attemptsText.Text = [string]$script:attemptCount
+    $currentAttemptText.Text = $script:lastAttempt
+    $statusText.Text = $status
+
+    $script:isRunning = $false
+    $script:startTime = $null
+    Set-UiRunning $false
+}
+
+$elapsedTimer = New-Object System.Windows.Threading.DispatcherTimer
+$elapsedTimer.Interval = [TimeSpan]::FromMilliseconds(50)
+$elapsedTimer.Add_Tick({
     if ($script:startTime) {
         $elapsedText.Text = Format-Duration ((Get-Date) - $script:startTime)
     }
     $attemptsText.Text = [string]$script:attemptCount
 })
 
-$worker = New-Object System.ComponentModel.BackgroundWorker
-$worker.WorkerSupportsCancellation = $true
-
-$worker.add_DoWork({
-    param($sender, $e)
-
-    $args = $e.Argument
-    $targetValue = [string]$args.Target
-    [char[]]$characters = $args.Characters
-
-    $attempts = 0L
-    $lastAttempt = ''
-    $found = $false
-    $aborted = $false
-
-    for ($length = 1; $length -le $targetValue.Length; $length++) {
-        $indices = New-Object int[] $length
-        while ($true) {
-            if ($sender.CancellationPending) {
-                $aborted = $true
-                break
-            }
-
-            $buffer = New-Object char[] $length
-            for ($i = 0; $i -lt $length; $i++) {
-                $buffer[$i] = $characters[$indices[$i]]
-            }
-            $candidate = -join $buffer
-            $lastAttempt = $candidate
-            $attempts++
-
-            if (($attempts % 300) -eq 0) {
-                $window.Dispatcher.BeginInvoke([action]{
-                    $currentAttemptText.Text = $lastAttempt
-                    $attemptsText.Text = [string]$attempts
-                }) | Out-Null
-            }
-
-            if ($candidate -ceq $targetValue) {
-                $found = $true
-                break
-            }
-
-            $pos = $length - 1
-            while ($pos -ge 0) {
-                $indices[$pos]++
-                if ($indices[$pos] -lt $characters.Length) {
-                    break
-                }
-                $indices[$pos] = 0
-                $pos--
-            }
-
-            if ($pos -lt 0) {
-                break
-            }
-        }
-
-        if ($found -or $aborted) {
-            break
-        }
-    }
-
-    $e.Result = @{
-        Found = $found
-        Aborted = $aborted
-        LastAttempt = $lastAttempt
-        Attempts = $attempts
-    }
-})
-
-$worker.add_RunWorkerCompleted({
-    param($sender, $e)
-
-    $timer.Stop()
-    if ($script:startTime) {
-        $elapsedText.Text = Format-Duration ((Get-Date) - $script:startTime)
-    }
-
-    if ($e.Error) {
-        $statusText.Text = 'Fehler aufgetreten'
-        [System.Windows.MessageBox]::Show("Fehler: $($e.Error.Message)", 'Fehler', 'OK', 'Error') | Out-Null
-        Set-UiRunning $false
-        $script:startTime = $null
+$workTimer = New-Object System.Windows.Threading.DispatcherTimer
+$workTimer.Interval = [TimeSpan]::FromMilliseconds(1)
+$workTimer.Add_Tick({
+    if (-not $script:isRunning) {
         return
     }
 
-    $result = $e.Result
-    $script:attemptCount = [long]$result.Attempts
-    $attemptsText.Text = [string]$script:attemptCount
-    $currentAttemptText.Text = [string]$result.LastAttempt
-
-    if ($result.Aborted) {
-        $statusText.Text = 'Abgebrochen'
-    } elseif ($result.Found) {
-        $statusText.Text = 'Passwort gefunden'
-    } else {
-        $statusText.Text = 'Nicht gefunden'
+    if ($script:stopRequested) {
+        Finish-Run 'Abgebrochen'
+        return
     }
 
-    Set-UiRunning $false
-    $script:startTime = $null
+    $batch = 2500
+    while ($batch -gt 0) {
+        $batch--
+
+        $buffer = New-Object char[] $script:length
+        for ($i = 0; $i -lt $script:length; $i++) {
+            $buffer[$i] = $script:characters[$script:indices[$i]]
+        }
+
+        $candidate = -join $buffer
+        $script:lastAttempt = $candidate
+        $script:attemptCount++
+
+        if (($script:attemptCount % 300) -eq 0) {
+            $currentAttemptText.Text = $script:lastAttempt
+            $attemptsText.Text = [string]$script:attemptCount
+        }
+
+        if ($candidate -ceq $script:target) {
+            Finish-Run 'Passwort gefunden'
+            return
+        }
+
+        $pos = $script:length - 1
+        while ($pos -ge 0) {
+            $script:indices[$pos]++
+            if ($script:indices[$pos] -lt $script:characters.Length) {
+                break
+            }
+            $script:indices[$pos] = 0
+            $pos--
+        }
+
+        if ($pos -lt 0) {
+            $script:length++
+            if ($script:length -gt $script:target.Length) {
+                Finish-Run 'Nicht gefunden'
+                return
+            }
+            $script:indices = New-Object int[] $script:length
+        }
+
+        if ($script:stopRequested) {
+            Finish-Run 'Abgebrochen'
+            return
+        }
+    }
 })
 
 $startButton.Add_Click({
-    if ($worker.IsBusy) {
+    if ($script:isRunning) {
         return
     }
 
@@ -263,8 +244,15 @@ $startButton.Add_Click({
         }
     }
 
-    $script:startTime = Get-Date
+    $script:target = $target
+    $script:characters = $charArray
+    $script:length = 1
+    $script:indices = New-Object int[] $script:length
+    $script:lastAttempt = ''
     $script:attemptCount = 0L
+    $script:startTime = Get-Date
+    $script:stopRequested = $false
+    $script:isRunning = $true
 
     $statusText.Text = 'Läuft ...'
     $elapsedText.Text = '00:00.000'
@@ -272,17 +260,13 @@ $startButton.Add_Click({
     $currentAttemptText.Text = ''
 
     Set-UiRunning $true
-    $timer.Start()
-
-    $worker.RunWorkerAsync(@{
-        Target = $target
-        Characters = $charArray
-    })
+    $elapsedTimer.Start()
+    $workTimer.Start()
 })
 
 $stopButton.Add_Click({
-    if ($worker.IsBusy) {
-        $worker.CancelAsync()
+    if ($script:isRunning) {
+        $script:stopRequested = $true
     }
 })
 
