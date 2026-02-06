@@ -60,25 +60,23 @@ Add-Type -AssemblyName WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-$passwordInput = $window.FindName("PasswordInput")
-$lettersCheckbox = $window.FindName("LettersCheckbox")
-$numbersCheckbox = $window.FindName("NumbersCheckbox")
-$specialCheckbox = $window.FindName("SpecialCheckbox")
-$accentCheckbox = $window.FindName("AccentCheckbox")
-$startButton = $window.FindName("StartButton")
-$stopButton = $window.FindName("StopButton")
-$statusText = $window.FindName("StatusText")
-$elapsedText = $window.FindName("ElapsedText")
-$attemptsText = $window.FindName("AttemptsText")
-$currentAttemptText = $window.FindName("CurrentAttemptText")
+$passwordInput = $window.FindName('PasswordInput')
+$lettersCheckbox = $window.FindName('LettersCheckbox')
+$numbersCheckbox = $window.FindName('NumbersCheckbox')
+$specialCheckbox = $window.FindName('SpecialCheckbox')
+$accentCheckbox = $window.FindName('AccentCheckbox')
+$startButton = $window.FindName('StartButton')
+$stopButton = $window.FindName('StopButton')
+$statusText = $window.FindName('StatusText')
+$elapsedText = $window.FindName('ElapsedText')
+$attemptsText = $window.FindName('AttemptsText')
+$currentAttemptText = $window.FindName('CurrentAttemptText')
 
-$script:cancelSource = $null
 $script:startTime = $null
 $script:attemptCount = 0L
-$script:lastAttempt = ""
 
 function Format-Duration([TimeSpan]$duration) {
-    return "{0:D2}:{1:D2}.{2:D3}" -f [int]$duration.TotalMinutes, $duration.Seconds, $duration.Milliseconds
+    '{0:D2}:{1:D2}.{2:D3}' -f [int]$duration.TotalMinutes, $duration.Seconds, $duration.Milliseconds
 }
 
 function Set-UiRunning([bool]$running) {
@@ -92,11 +90,11 @@ function Set-UiRunning([bool]$running) {
 }
 
 function Get-CharacterSet {
-    $lower = "abcdefghijklmnopqrstuvwxyz"
-    $upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    $digits = "0123456789"
-    $special = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
-    $accent = "äöüÄÖÜßàáâãåāçćčèéêëēìíîïīñńòóôõøōùúûüūýÿžźż"
+    $lower = 'abcdefghijklmnopqrstuvwxyz'
+    $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    $digits = '0123456789'
+    $special = '!"#$%&''()*+,-./:;<=>?@[\]^_`{|}~'
+    $accent = 'äöüÄÖÜßàáâãåāçćčèéêëēìíîïīñńòóôõøōùúûüūýÿžźż'
 
     $builder = New-Object System.Text.StringBuilder
     if ($lettersCheckbox.IsChecked) {
@@ -119,13 +117,13 @@ function Get-CharacterSet {
     }
 
     $set = New-Object 'System.Collections.Generic.HashSet[char]'
-    $chars = New-Object System.Collections.Generic.List[char]
+    $chars = New-Object 'System.Collections.Generic.List[char]'
     foreach ($ch in $raw.ToCharArray()) {
         if ($set.Add($ch)) {
-            $chars.Add($ch)
+            [void]$chars.Add($ch)
         }
     }
-    return $chars
+    return $chars.ToArray()
 }
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -137,118 +135,154 @@ $timer.Add_Tick({
     $attemptsText.Text = [string]$script:attemptCount
 })
 
-$startButton.Add_Click({
-    $target = $passwordInput.Password
-    if ([string]::IsNullOrWhiteSpace($target)) {
-        [System.Windows.MessageBox]::Show("Bitte zuerst ein Passwort eingeben.", "Hinweis", "OK", "Information") | Out-Null
-        return
-    }
+$worker = New-Object System.ComponentModel.BackgroundWorker
+$worker.WorkerSupportsCancellation = $true
 
-    $charList = Get-CharacterSet
-    if ($charList.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("Bitte mindestens eine Zeichenkategorie auswählen.", "Hinweis", "OK", "Warning") | Out-Null
-        return
-    }
+$worker.add_DoWork({
+    param($sender, $e)
 
-    foreach ($ch in $target.ToCharArray()) {
-        if (-not $charList.Contains($ch)) {
-            [System.Windows.MessageBox]::Show("Das Passwort enthält Zeichen, die nicht in den gewählten Kategorien enthalten sind.", "Zeichen nicht enthalten", "OK", "Warning") | Out-Null
-            return
-        }
-    }
+    $args = $e.Argument
+    $targetValue = [string]$args.Target
+    [char[]]$characters = $args.Characters
 
-    Set-UiRunning $true
-    $statusText.Text = "Läuft ..."
-    $elapsedText.Text = "00:00.000"
-    $attemptsText.Text = "0"
-    $currentAttemptText.Text = ""
+    $attempts = 0L
+    $lastAttempt = ''
+    $found = $false
+    $aborted = $false
 
-    $script:startTime = Get-Date
-    $script:attemptCount = 0L
-    $script:lastAttempt = ""
-
-    $script:cancelSource = New-Object System.Threading.CancellationTokenSource
-    $token = $script:cancelSource.Token
-
-    $timer.Start()
-
-    [System.Threading.Tasks.Task]::Run({
-        param($windowRef, $targetValue, $characters, $ct)
-
-        $targetLength = $targetValue.Length
-        $found = $false
-        $aborted = $false
-
-        for ($length = 1; $length -le $targetLength; $length++) {
-            $indices = New-Object int[] $length
-            while ($true) {
-                if ($ct.IsCancellationRequested) {
-                    $aborted = $true
-                    break
-                }
-
-                $buffer = New-Object char[] $length
-                for ($i = 0; $i -lt $length; $i++) {
-                    $buffer[$i] = $characters[$indices[$i]]
-                }
-                $candidate = -join $buffer
-
-                [System.Threading.Interlocked]::Increment([ref]$script:attemptCount) | Out-Null
-                $script:lastAttempt = $candidate
-
-                if (($script:attemptCount % 300) -eq 0) {
-                    $windowRef.Dispatcher.Invoke([action]{
-                        $currentAttemptText.Text = $script:lastAttempt
-                        $attemptsText.Text = [string]$script:attemptCount
-                    })
-                }
-
-                if ($candidate -ceq $targetValue) {
-                    $found = $true
-                    break
-                }
-
-                $pos = $length - 1
-                while ($pos -ge 0) {
-                    $indices[$pos]++
-                    if ($indices[$pos] -lt $characters.Count) {
-                        break
-                    }
-                    $indices[$pos] = 0
-                    $pos--
-                }
-
-                if ($pos -lt 0) {
-                    break
-                }
+    for ($length = 1; $length -le $targetValue.Length; $length++) {
+        $indices = New-Object int[] $length
+        while ($true) {
+            if ($sender.CancellationPending) {
+                $aborted = $true
+                break
             }
 
-            if ($found -or $aborted) {
+            $buffer = New-Object char[] $length
+            for ($i = 0; $i -lt $length; $i++) {
+                $buffer[$i] = $characters[$indices[$i]]
+            }
+            $candidate = -join $buffer
+            $lastAttempt = $candidate
+            $attempts++
+
+            if (($attempts % 300) -eq 0) {
+                $window.Dispatcher.BeginInvoke([action]{
+                    $currentAttemptText.Text = $lastAttempt
+                    $attemptsText.Text = [string]$attempts
+                }) | Out-Null
+            }
+
+            if ($candidate -ceq $targetValue) {
+                $found = $true
+                break
+            }
+
+            $pos = $length - 1
+            while ($pos -ge 0) {
+                $indices[$pos]++
+                if ($indices[$pos] -lt $characters.Length) {
+                    break
+                }
+                $indices[$pos] = 0
+                $pos--
+            }
+
+            if ($pos -lt 0) {
                 break
             }
         }
 
-        $windowRef.Dispatcher.Invoke([action]{
-            $timer.Stop()
-            $elapsedText.Text = Format-Duration ((Get-Date) - $script:startTime)
-            $attemptsText.Text = [string]$script:attemptCount
-            $currentAttemptText.Text = $script:lastAttempt
-            if ($aborted) {
-                $statusText.Text = "Abgebrochen"
-            } elseif ($found) {
-                $statusText.Text = "Passwort gefunden"
-            } else {
-                $statusText.Text = "Nicht gefunden"
-            }
-            Set-UiRunning $false
-            $script:startTime = $null
-        })
-    }, $window, $target, $charList, $token) | Out-Null
+        if ($found -or $aborted) {
+            break
+        }
+    }
+
+    $e.Result = @{
+        Found = $found
+        Aborted = $aborted
+        LastAttempt = $lastAttempt
+        Attempts = $attempts
+    }
+})
+
+$worker.add_RunWorkerCompleted({
+    param($sender, $e)
+
+    $timer.Stop()
+    if ($script:startTime) {
+        $elapsedText.Text = Format-Duration ((Get-Date) - $script:startTime)
+    }
+
+    if ($e.Error) {
+        $statusText.Text = 'Fehler aufgetreten'
+        [System.Windows.MessageBox]::Show("Fehler: $($e.Error.Message)", 'Fehler', 'OK', 'Error') | Out-Null
+        Set-UiRunning $false
+        $script:startTime = $null
+        return
+    }
+
+    $result = $e.Result
+    $script:attemptCount = [long]$result.Attempts
+    $attemptsText.Text = [string]$script:attemptCount
+    $currentAttemptText.Text = [string]$result.LastAttempt
+
+    if ($result.Aborted) {
+        $statusText.Text = 'Abgebrochen'
+    } elseif ($result.Found) {
+        $statusText.Text = 'Passwort gefunden'
+    } else {
+        $statusText.Text = 'Nicht gefunden'
+    }
+
+    Set-UiRunning $false
+    $script:startTime = $null
+})
+
+$startButton.Add_Click({
+    if ($worker.IsBusy) {
+        return
+    }
+
+    $target = $passwordInput.Password
+    if ([string]::IsNullOrWhiteSpace($target)) {
+        [System.Windows.MessageBox]::Show('Bitte zuerst ein Passwort eingeben.', 'Hinweis', 'OK', 'Information') | Out-Null
+        return
+    }
+
+    [char[]]$charArray = Get-CharacterSet
+    if ($charArray.Length -eq 0) {
+        [System.Windows.MessageBox]::Show('Bitte mindestens eine Zeichenkategorie auswählen.', 'Hinweis', 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    foreach ($ch in $target.ToCharArray()) {
+        if ($charArray -notcontains $ch) {
+            [System.Windows.MessageBox]::Show('Das Passwort enthält Zeichen, die nicht in den gewählten Kategorien enthalten sind.', 'Zeichen nicht enthalten', 'OK', 'Warning') | Out-Null
+            return
+        }
+    }
+
+    $script:startTime = Get-Date
+    $script:attemptCount = 0L
+
+    $statusText.Text = 'Läuft ...'
+    $elapsedText.Text = '00:00.000'
+    $attemptsText.Text = '0'
+    $currentAttemptText.Text = ''
+
+    Set-UiRunning $true
+    $timer.Start()
+
+    $worker.RunWorkerAsync(@{
+        Target = $target
+        Characters = $charArray
+    })
 })
 
 $stopButton.Add_Click({
-    if ($script:cancelSource) {
-        $script:cancelSource.Cancel()
+    if ($worker.IsBusy) {
+        $worker.CancelAsync()
     }
 })
 
